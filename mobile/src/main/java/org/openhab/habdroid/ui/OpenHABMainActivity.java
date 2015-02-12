@@ -17,8 +17,11 @@ import android.Manifest;
 import android.app.AlertDialog;
 import android.app.PendingIntent;
 import android.app.ProgressDialog;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
@@ -34,6 +37,7 @@ import android.speech.RecognizerIntent;
 import android.support.v4.app.ActionBarDrawerToggle;
 import android.support.v4.app.FragmentActivity;
 import android.support.v4.app.FragmentManager;
+import android.support.v4.view.GravityCompat;
 import android.support.v4.widget.DrawerLayout;
 import android.text.TextUtils;
 import android.util.Log;
@@ -48,7 +52,7 @@ import android.widget.ListView;
 import android.widget.Toast;
 
 import com.crittercism.app.Crittercism;
-import com.google.analytics.tracking.android.EasyTracker;
+import com.google.android.gms.analytics.GoogleAnalytics;
 import com.google.android.gms.gcm.GoogleCloudMessaging;
 import com.loopj.android.http.AsyncHttpClient;
 import com.loopj.android.http.AsyncHttpResponseHandler;
@@ -63,10 +67,12 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 import org.openhab.habdroid.R;
+import org.openhab.habdroid.core.HABDroid;
 import org.openhab.habdroid.core.NetworkConnectivityInfo;
 import org.openhab.habdroid.core.NotificationDeletedBroadcastReceiver;
 import org.openhab.habdroid.core.OpenHABTracker;
 import org.openhab.habdroid.core.OpenHABTrackerReceiver;
+import org.openhab.habdroid.core.OpenHABVoiceService;
 import org.openhab.habdroid.model.OpenHABLinkedPage;
 import org.openhab.habdroid.model.OpenHABSitemap;
 import org.openhab.habdroid.ui.drawer.OpenHABDrawerAdapter;
@@ -98,7 +104,6 @@ public class OpenHABMainActivity extends FragmentActivity implements OnWidgetSel
     // Logging TAG
     private static final String TAG = "MainActivity";
     // Activities request codes
-    private static final int VOICE_RECOGNITION_REQUEST_CODE = 1001;
     private static final int SETTINGS_REQUEST_CODE = 1002;
     private static final int WRITE_NFC_TAG_REQUEST_CODE = 1003;
     private static final int INFO_REQUEST_CODE = 1004;
@@ -136,8 +141,6 @@ public class OpenHABMainActivity extends FragmentActivity implements OnWidgetSel
     private static AsyncHttpClient mAsyncHttpClient = new AsyncHttpClient();
     // NFC Launch data
     private String mNfcData;
-    // Voice Launch data
-    private String mVoiceData;
     // Pending NFC page
     private String mPendingNfcPage;
     // Drawer Layout
@@ -152,6 +155,7 @@ public class OpenHABMainActivity extends FragmentActivity implements OnWidgetSel
     private String[] mDrawerTitles = {"First floor", "Seconf floor", "Cellar", "Garage"};
     private ListView mDrawerList;
     private List<OpenHABSitemap> mSitemapList;
+    private boolean supportsKitKat = false;
     private NetworkConnectivityInfo mStartedWithNetworkConnectivityInfo;
     private int mOpenHABVersion;
 
@@ -195,6 +199,8 @@ public class OpenHABMainActivity extends FragmentActivity implements OnWidgetSel
         if (!isDeveloper)
             Util.initCrittercism(getApplicationContext(), "5117659f59e1bd4ba9000004");
         super.onCreate(savedInstanceState);
+        if (!isDeveloper)
+            ((HABDroid) getApplication()).getTracker(HABDroid.TrackerName.APP_TRACKER);
         setContentView(R.layout.activity_main);
         gcmRegisterBackground();
         // Enable app icon in action bar work as 'home'
@@ -229,6 +235,7 @@ public class OpenHABMainActivity extends FragmentActivity implements OnWidgetSel
             sitemapRootUrl = savedInstanceState.getString("sitemapRootUrl");
             mStartedWithNetworkConnectivityInfo = savedInstanceState.getParcelable("startedWithNetworkConnectivityInfo");
         }
+        mDrawerLayout.setDrawerShadow(R.drawable.drawer_shadow, GravityCompat.START);
         mSitemapList = new ArrayList<OpenHABSitemap>();
         mDrawerAdapter = new OpenHABDrawerAdapter(this, R.layout.openhabdrawer_item, mSitemapList);
         mDrawerAdapter.setOpenHABUsername(openHABUsername);
@@ -255,24 +262,26 @@ public class OpenHABMainActivity extends FragmentActivity implements OnWidgetSel
                 if (getIntent().getAction().equals("android.nfc.action.NDEF_DISCOVERED")) {
                     Log.d(TAG, "This is NFC action");
                     if (getIntent().getDataString() != null) {
-
-
-
-
                         Log.d(TAG, "NFC data = " + getIntent().getDataString());
                         mNfcData = getIntent().getDataString();
                     }
                 } else if (getIntent().getAction().equals("org.openhab.notification.selected")) {
                     onNotificationSelected(getIntent());
                 }
-            }else if(getIntent().getExtras() != null){
-                Log.d(TAG, "This is Voice action");
-
-                List<String> results = getIntent().getExtras().getStringArrayList("android.speech.extra.RESULTS");
-                if (!results.isEmpty()) {
-                    mVoiceData = results.get(0);
-                }
             }
+        }
+
+        /**
+         * If we are 4.4 we can use fullscreen mode and Daydream features
+         */
+        supportsKitKat = Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT;
+
+        boolean fullScreen = mSettings.getBoolean("default_openhab_fullscreen", false);
+
+        if(supportsKitKat && fullScreen){
+            registerReceiver(dreamReceiver, new IntentFilter("android.intent.action.DREAMING_STARTED"));
+            registerReceiver(dreamReceiver, new IntentFilter("android.intent.action.DREAMING_STOPPED"));
+            checkFullscreen();
         }
     }
 
@@ -343,6 +352,8 @@ public class OpenHABMainActivity extends FragmentActivity implements OnWidgetSel
         if (!TextUtils.isEmpty(mPendingNfcPage)) {
             openNFCPageIfPending();
         }
+
+        checkFullscreen();
     }
 
     public void openNFCPageIfPending() {
@@ -368,9 +379,6 @@ public class OpenHABMainActivity extends FragmentActivity implements OnWidgetSel
         if (!TextUtils.isEmpty(mNfcData)) {
             onNfcTag(mNfcData);
             openNFCPageIfPending();
-        } else if (!TextUtils.isEmpty(mVoiceData)) {
-            sendItemCommand("VoiceCommand", mVoiceData);
-            finish();
         } else {
             mAsyncHttpClient.get(baseUrl + "rest/bindings", new TextHttpResponseHandler() {
                 @Override
@@ -640,7 +648,7 @@ public class OpenHABMainActivity extends FragmentActivity implements OnWidgetSel
                 return true;
             case R.id.mainmenu_openhab_info:
                 Intent infoIntent = new Intent(this.getApplicationContext(), OpenHABInfoActivity.class);
-                infoIntent.putExtra("openHABBaseUrl", openHABBaseUrl);
+                infoIntent.putExtra(OpenHABVoiceService.OPENHAB_BASE_URL_EXTRA, openHABBaseUrl);
                 infoIntent.putExtra("username", openHABUsername);
                 infoIntent.putExtra("password", openHABPassword);
                 startActivityForResult(infoIntent, INFO_REQUEST_CODE);
@@ -673,29 +681,6 @@ public class OpenHABMainActivity extends FragmentActivity implements OnWidgetSel
             case WRITE_NFC_TAG_REQUEST_CODE:
                 Log.d(TAG, "Got back from Write NFC tag");
                 break;
-            case VOICE_RECOGNITION_REQUEST_CODE:
-                Log.d(TAG, "Got back from Voice recognition");
-                setProgressBarIndeterminateVisibility(false);
-                if(resultCode == RESULT_OK) {
-                    ArrayList<String> textMatchList = data
-                            .getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
-                    if (!textMatchList.isEmpty()) {
-                        Log.d(TAG, textMatchList.get(0));
-                        Log.d(TAG, "Recognized text: " + textMatchList.get(0));
-                        Toast.makeText(this, "I recognized: " + textMatchList.get(0),
-                                Toast.LENGTH_LONG).show();
-                        sendItemCommand("VoiceCommand", textMatchList.get(0));
-                    } else {
-                        Log.d(TAG, "Voice recognition returned empty set");
-                        Toast.makeText(this, "I can't read you!",
-                                Toast.LENGTH_LONG).show();
-                    }
-                } else {
-                    Log.d(TAG, "A voice recognition error occured");
-                    Toast.makeText(this, "A voice recognition error occured",
-                            Toast.LENGTH_LONG).show();
-                }
-                break;
             default:
         }
     }
@@ -726,7 +711,7 @@ public class OpenHABMainActivity extends FragmentActivity implements OnWidgetSel
         super.onStart();
         // Start activity tracking via Google Analytics
         if (!isDeveloper)
-            EasyTracker.getInstance().activityStart(this);
+            GoogleAnalytics.getInstance(this).reportActivityStart(this);
     }
 
     /**
@@ -738,7 +723,7 @@ public class OpenHABMainActivity extends FragmentActivity implements OnWidgetSel
         super.onStop();
         // Stop activity tracking via Google Analytics
         if (!isDeveloper)
-            EasyTracker.getInstance().activityStop(this);
+            GoogleAnalytics.getInstance(this).reportActivityStop(this);
         if (mOpenHABTracker != null)
             mOpenHABTracker.stop();
     }
@@ -863,14 +848,18 @@ public class OpenHABMainActivity extends FragmentActivity implements OnWidgetSel
     }
 
     private void launchVoiceRecognition() {
-        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-        // Specify the calling package to identify your application
-        intent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, ((Object) this).getClass().getPackage().getName());
+        Intent callbackIntent = new Intent(this, OpenHABVoiceService.class);
+        callbackIntent.putExtra(OpenHABVoiceService.OPENHAB_BASE_URL_EXTRA, openHABBaseUrl);
+        PendingIntent openhabPendingIntent = PendingIntent.getService(this, 0, callbackIntent, 0);
+
+        Intent speechIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
         // Display an hint to the user about what he should say.
-        intent.putExtra(RecognizerIntent.EXTRA_PROMPT, getString(R.string.info_voice_input));
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-        intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
-        startActivityForResult(intent, VOICE_RECOGNITION_REQUEST_CODE);
+        speechIntent.putExtra(RecognizerIntent.EXTRA_PROMPT, getString(R.string.info_voice_input));
+        speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        speechIntent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+        speechIntent.putExtra(RecognizerIntent.EXTRA_RESULTS_PENDINGINTENT, openhabPendingIntent);
+
+        startActivity(speechIntent);
     }
 
 
@@ -1047,4 +1036,32 @@ public class OpenHABMainActivity extends FragmentActivity implements OnWidgetSel
             }
         }.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR,null, null, null);
     }
+
+    /**
+     * If fullscreen is enabled and we are on at least android 4.4 set
+     * the system visibility to fullscreen + immersive + noNav
+     * @author Dan Cunningham
+     */
+    protected void checkFullscreen(){
+        if(supportsKitKat && mSettings.getBoolean("default_openhab_fullscreen", false)) {
+            int uiOptions = getWindow().getDecorView().getSystemUiVisibility();
+            uiOptions |= View.SYSTEM_UI_FLAG_HIDE_NAVIGATION;
+            uiOptions |= View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
+            uiOptions |= View.SYSTEM_UI_FLAG_FULLSCREEN;
+            getWindow().getDecorView().setSystemUiVisibility(uiOptions);
+        }
+    }
+
+    /*
+     *Daydreaming gets us into a funk when in fullscreen, this allows us to
+     *reset ourselves to fullscreen.
+     * @author Dan Cunningham
+     */
+    private BroadcastReceiver dreamReceiver = new BroadcastReceiver(){
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            Log.i("INTENTFILTER", "Recieved intent: " + intent.toString());
+            checkFullscreen();
+        }
+    };
 }
